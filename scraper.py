@@ -6,10 +6,13 @@ from selenium.webdriver.support import expected_conditions as EC
 import time
 import os
 
-def setup_driver():
-    """Configurar o Selenium WebDriver."""
-    driver_path = r""  
-    service = Service(driver_path)
+def setup_driver(driver_path=None):
+    """Configura e retorna o Selenium WebDriver.
+
+    Caso nenhum caminho seja informado, o Selenium tentará utilizar o
+    executável ``chromedriver`` disponível no ``PATH`` do sistema.
+    """
+    service = Service(driver_path) if driver_path else Service()
     driver = webdriver.Chrome(service=service)
     driver.maximize_window()
     return driver
@@ -29,7 +32,9 @@ def save_registered_courses(registry_path, courses):
 
 def save_courses(courses, output_path):
     """Salvar detalhes dos cursos em um arquivo de texto."""
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    directory = os.path.dirname(output_path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as file:
         for course in courses:
             file.write(f"Curso: {course['name']}\n")
