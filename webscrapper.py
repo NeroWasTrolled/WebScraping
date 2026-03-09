@@ -1,164 +1,340 @@
-from selenium import webdriver
+from pathlib import Path
+import json
+import time
 
+from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, WebDriverException
+from webdriver_manager.chrome import ChromeDriverManager
 
-import time
-import os
 
-import json
+def config_file(config_path="config.json"):
+    """Carrega e valida o arquivo de configuração."""
+    config_path = Path(config_path)
 
-def config_file():
-    with open("config.json", "r") as f:
+    if not config_path.exists():
+        raise FileNotFoundError(f"❌ Arquivo de configuração não encontrado: {config_path.resolve()}")
+
+    with open(config_path, "r", encoding="utf-8") as f:
         conf = json.load(f)
 
-    required_keys = ["url", "starting_page", "driver_path", "out_file", "already_scanned_file", "category", "modality"]
+    required_keys = [
+        "url",
+        "starting_page",
+        "out_file",
+        "already_scanned_file",
+        "category",
+        "modality",
+    ]
+
     for key in required_keys:
         if key not in conf:
             raise ValueError(f"❌ Configuração faltando: {key}")
 
+    try:
+        conf["starting_page"] = int(conf["starting_page"])
+    except ValueError:
+        raise ValueError("❌ 'starting_page' deve ser um número inteiro.")
+
+    conf["headless"] = bool(conf.get("headless", False))
+    conf["max_retries"] = int(conf.get("max_retries", 3))
+    conf["retry_delay"] = float(conf.get("retry_delay", 2))
+
     return conf
 
-# configuração do webdriver
-def setup_driver(conf):
-    """Configurar o Selenium WebDriver."""
-    driver_path = conf["driver_path"]
-    
-    # Configurações adicionais do Chrome (opcional)
-    chrome_options = Options()
-    chrome_options.add_argument("--start-maximized")  # Inicia o Chrome maximizado
-    chrome_options.add_argument("--headless")  # Desmarque para executar em modo headless (sem interface gráfica)
 
-    service = Service(driver_path)
+def setup_driver(conf):
+    """Configura o Selenium WebDriver com download automático do driver compatível."""
+    chrome_options = Options()
+    chrome_options.add_argument("--start-maximized")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_argument("--log-level=3")
+
+    if conf.get("headless", False):
+        chrome_options.add_argument("--headless=new")
+        chrome_options.add_argument("--window-size=1920,1080")
+
+    print("🔍 Detectando versão do Chrome e baixando ChromeDriver compatível...")
+
+    service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=chrome_options)
-    
+
+    print("✅ ChromeDriver configurado com sucesso.")
+
     return driver
 
-# Fazer o log de cursos que já foram verificados
+
+def ensure_parent_dir(file_path):
+    """Garante que a pasta pai do arquivo exista."""
+    path = Path(file_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+
 def load_registered_courses(registry_path):
-    """Carregar cursos registrados de um arquivo."""
-    if os.path.exists(registry_path):
+    """Carrega cursos já registrados de um arquivo."""
+    registry_path = Path(registry_path)
+
+    if registry_path.exists():
         with open(registry_path, "r", encoding="utf-8") as file:
-            return set(line.strip() for line in file)
+            return set(line.strip() for line in file if line.strip())
+
     return set()
 
-# Fazer o cadastro dos cursos em sí
+
 def save_registered_courses(registry_path, courses):
-    """Salvar cursos registrados em um arquivo."""
+    """Salva cursos já registrados em um arquivo."""
+    registry_path = Path(registry_path)
+    ensure_parent_dir(registry_path)
+
     with open(registry_path, "w", encoding="utf-8") as file:
-        for course in courses:
+        for course in sorted(courses):
             file.write(f"{course}\n")
 
-# Padrão de salvamento do arquivo
-def save_course(course, output_path):
-    """Salvar detalhes de um curso diretamente em um arquivo de texto e atualizar o índice no topo."""
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-    # Adiciona os dados do novo curso ao final
+def save_course(course, output_path):
+    """Salva detalhes de um curso em arquivo texto e atualiza índice no topo."""
+    output_path = Path(output_path)
+    ensure_parent_dir(output_path)
+
     with open(output_path, "a", encoding="utf-8") as file:
         file.write(f"Curso: {course['name']}\n")
         file.write(f"Modalidade: {course['modality']}\n")
         file.write(f"Categoria: {course['category']}\n")
         file.write(f"Duração: {course['duration']}\n")
+        # file.write(f"Valor Normal: {course['value_norm']}\n")
+        # file.write(f"Valor com Desconto: {course['value_disc']}\n")
+        # file.write(f"URL: {course['url']}\n")
         file.write(f"Descrição: {course['description']}\n")
-        file.write("-----------------------------------------------\n")
+        file.write("--------------------------------------------------\n")
 
-    # Após adicionar, atualizar o índice no topo
-    with open(output_path, 'r', encoding='utf-8') as file:
+    with open(output_path, "r", encoding="utf-8") as file:
         linhas = file.readlines()
 
-    # Pega só os títulos
-    titulos = [linha.strip().split("Curso: ")[1]
-               for linha in linhas if linha.startswith("Curso:")]
+    titulos = []
+    for linha in linhas:
+        if linha.startswith("Curso:"):
+            partes = linha.strip().split("Curso: ", 1)
+            if len(partes) > 1:
+                titulos.append(partes[1])
 
-    # Monta o índice
     indice = ["ÍNDICE DE CURSOS:\n"]
     for i, titulo in enumerate(titulos, 1):
         indice.append(f"{i}. {titulo}\n")
-    indice.append("\n")  # espaço entre índice e corpo
+    indice.append("\n")
 
-    # Remove índices antigos, pega só a parte dos cursos
-    curso_inicio_index = next((i for i, linha in enumerate(linhas) if linha.startswith("Curso:")), 0)
+    curso_inicio_index = next((i for i, linha in enumerate(linhas) if linha.startswith("Curso:")), len(linhas))
     corpo = linhas[curso_inicio_index:]
 
-    # Reescreve o arquivo com o índice no topo
-    with open(output_path, 'w', encoding='utf-8') as file:
+    with open(output_path, "w", encoding="utf-8") as file:
         file.writelines(indice + corpo)
 
-# Pegar todas as informações sobre o curso
-def scrape_course_details(driver, course_url, conf):
-    """Coletar detalhes de um curso individual com verificações de erro."""
+
+def safe_text(element):
+    """Retorna texto limpo de um elemento."""
     try:
-        driver.get(course_url)
+        return element.text.strip()
+    except Exception:
+        return ""
 
-        try:
-            WebDriverWait(driver, 20, 1.0).until(
-                EC.presence_of_element_located((By.XPATH, "//h3[@class='course-single-title']"))
-            )
-        except:
-            print(f"Curso desativado ou página inválida: {course_url}")
-            return None
 
-        # Coletando o nome do curso
+def is_bad_description_text(text):
+    """
+    Filtra textos que não devem entrar na descrição,
+    como títulos de seção e cabeçalhos genéricos.
+    """
+    if not text:
+        return True
+
+    normalized = " ".join(text.split()).strip()
+
+    if not normalized:
+        return True
+
+    blocked_exact = {
+        "INFORMAÇÕES SOBRE O CURSO",
+        "INFORMACOES SOBRE O CURSO",
+        "SOBRE O CURSO",
+        "CONHEÇA O CURSO",
+        "CONHECA O CURSO",
+        "MAIS INFORMAÇÕES",
+        "MAIS INFORMACOES",
+        "APRESENTAÇÃO DO CURSO",
+        "APRESENTACAO DO CURSO",
+    }
+
+    if normalized.upper() in blocked_exact:
+        return True
+
+    # ignora títulos muito curtos em caixa alta
+    if normalized.isupper() and len(normalized) <= 40:
+        return True
+
+    # ignora textos extremamente curtos
+    if len(normalized) < 10:
+        return True
+
+    return False
+
+
+def retry_operation(operation, description, max_retries=3, retry_delay=2):
+    """Executa uma operação com retry automático."""
+    last_error = None
+
+    for attempt in range(1, max_retries + 1):
         try:
-            name = driver.find_element(By.XPATH, "//h3[@class='course-single-title']").text.strip()
+            return operation()
         except Exception as e:
-            print(f"Erro ao coletar nome do curso {course_url}: {e}")
+            last_error = e
+            print(f"⚠️ Falha em '{description}' | tentativa {attempt}/{max_retries}: {e}")
+
+            if attempt < max_retries:
+                sleep_time = retry_delay * attempt
+                print(f"🔁 Tentando novamente em {sleep_time:.1f}s...")
+                time.sleep(sleep_time)
+
+    print(f"❌ Falha definitiva em '{description}' após {max_retries} tentativas.")
+    raise last_error
+
+
+def open_page_with_retry(driver, url, wait_xpath=None, timeout=20, max_retries=3, retry_delay=2):
+    """Abre uma página com retry e espera opcional por um elemento."""
+    def operation():
+        driver.get(url)
+
+        if wait_xpath:
+            WebDriverWait(driver, timeout, 1.0).until(
+                EC.presence_of_element_located((By.XPATH, wait_xpath))
+            )
+
+        return True
+
+    return retry_operation(
+        operation=operation,
+        description=f"Abrir página: {url}",
+        max_retries=max_retries,
+        retry_delay=retry_delay,
+    )
+
+
+def extract_description(driver):
+    """
+    Tenta extrair a descrição do curso de forma universal,
+    cobrindo múltiplas estruturas possíveis do site.
+    """
+    description_strategies = [
+        (
+            "layout tutor-course-summery",
+            "//div[contains(@class, 'tutor-course-summery')]//p"
+        ),
+        (
+            "section com h2 'Sobre o curso'",
+            "//section[.//h2[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZÁÀÃÂÉÈÊÍÌÎÓÒÕÔÚÙÛÇ', 'abcdefghijklmnopqrstuvwxyzáàãâéèêíìîóòõôúùûç'), 'sobre o curso')]]//p"
+        ),
+        (
+            "section com header e h2 'Sobre o curso'",
+            "//section[.//header//h2[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZÁÀÃÂÉÈÊÍÌÎÓÒÕÔÚÙÛÇ', 'abcdefghijklmnopqrstuvwxyzáàãâéèêíìîóòõôúùûç'), 'sobre o curso')]]//p"
+        ),
+        (
+            "qualquer heading com 'Sobre o curso'",
+            "//*[self::section or self::div][.//*[self::h1 or self::h2 or self::h3 or self::h4][contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZÁÀÃÂÉÈÊÍÌÎÓÒÕÔÚÙÛÇ', 'abcdefghijklmnopqrstuvwxyzáàãâéèêíìîóòõôúùûç'), 'sobre o curso')]]//p"
+        ),
+        (
+            "section com id contendo unicv",
+            "//section[contains(translate(@id, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'unicv')]//p"
+        ),
+    ]
+
+    for label, xpath in description_strategies:
+        try:
+            elements = driver.find_elements(By.XPATH, xpath)
+
+            texts = []
+            for element in elements:
+                text = safe_text(element)
+
+                if is_bad_description_text(text):
+                    continue
+
+                texts.append(text)
+
+            if texts:
+                print(f"📝 Descrição encontrada usando: {label}")
+                return " ".join(texts)
+
+        except Exception as e:
+            print(f"⚠️ Falha ao tentar coletar descrição usando '{label}': {e}")
+
+    return "Descrição não disponível"
+
+
+def scrape_course_details(driver, course_url, conf):
+    """Coleta detalhes de um curso individual com tratamento de erro e retry."""
+    try:
+        open_page_with_retry(
+            driver=driver,
+            url=course_url,
+            wait_xpath="//h3[@class='course-single-title']",
+            timeout=20,
+            max_retries=conf["max_retries"],
+            retry_delay=conf["retry_delay"],
+        )
+
+        try:
+            name = safe_text(driver.find_element(By.XPATH, "//h3[@class='course-single-title']")) or "Nome não disponível"
+        except Exception as e:
+            print(f"❌ Erro ao coletar nome do curso {course_url}: {e}")
             name = "Nome não disponível"
 
-        # Coletando a descrição do curso
         try:
-            description_elements = driver.find_elements(By.XPATH, "//div[@class='tutor-course-summery']/p")
-            description = " ".join([element.text.strip() for element in description_elements]) if description_elements else "Descrição não disponível"
+            description = extract_description(driver)
         except Exception as e:
-            print(f"Erro ao coletar descrição do curso {course_url}: {e}")
+            print(f"❌ Erro ao coletar descrição do curso {course_url}: {e}")
             description = "Descrição não disponível"
 
-        # Coletando a duração
         try:
-            duration_min_elements = driver.find_elements(By.XPATH, "//span[@class='value']/span[@class='tutor-meta-level']")
-            duration = duration_min_elements[0].text.strip() if duration_min_elements else "Duração mínima não disponível"
+            duration_min_elements = driver.find_elements(
+                By.XPATH,
+                "//span[@class='value']/span[@class='tutor-meta-level']"
+            )
+            duration = safe_text(duration_min_elements[0]) if duration_min_elements else "Duração não disponível"
         except Exception as e:
-            print(f"Erro ao coletar duração do curso {course_url}: {e}")
-            duration = "Duração mínima não disponível"
+            print(f"❌ Erro ao coletar duração do curso {course_url}: {e}")
+            duration = "Duração não disponível"
 
-        # Coletando o valor do curso
         try:
-            course_value = driver.find_element(By.XPATH, "//div[@class='price']").text.strip()
+            course_value = safe_text(driver.find_element(By.XPATH, "//div[@class='price']")) or "Valor não disponível"
         except Exception as e:
-            print(f"Erro ao coletar valor do curso {course_url}: {e}")
+            print(f"❌ Erro ao coletar valor do curso {course_url}: {e}")
             course_value = "Valor não disponível"
 
-        # Coletando o valor com desconto
         try:
-            discount_value = driver.find_element(By.XPATH, "//div[@class='por']").text.strip()
+            discount_value = safe_text(driver.find_element(By.XPATH, "//div[@class='por']")) or "Valor com desconto não disponível"
         except Exception as e:
-            print(f"Erro ao coletar valor com desconto do curso {course_url}: {e}")
+            print(f"❌ Erro ao coletar valor com desconto do curso {course_url}: {e}")
             discount_value = "Valor com desconto não disponível"
-
-        # Categoria e Modalidade fixas
-        category = conf["category"]
-        modality = conf["modality"]
 
         return {
             "name": name,
             "description": description,
             "duration": duration,
-            "category": category,
-            "modality": modality,
-            "value_norm": course_value,
-            "value_disc": discount_value,
+            "category": conf["category"],
+            "modality": conf["modality"],
+            # "value_norm": course_value,
+            # "value_disc": discount_value,
             "url": course_url,
         }
+
     except Exception as e:
-        print(f"Erro ao acessar detalhes do curso {course_url}: {e}")
+        print(f"❌ Erro ao acessar detalhes do curso {course_url}: {e}")
         return None
 
+
 def scrape_courses(driver, conf, output_path, registry_path):
-    """Coletar todos os cursos navegando por paginação com verificações de erro."""
+    """Coleta todos os cursos navegando por paginação com retry automático."""
     base_url = conf["url"]
     starting_page = conf["starting_page"]
     registered_courses = load_registered_courses(registry_path)
@@ -167,61 +343,85 @@ def scrape_courses(driver, conf, output_path, registry_path):
 
     while True:
         try:
-            print(f"Coletando página {page}...")
+            print(f"\n📄 Coletando página {page}...")
 
             page_url = f"{base_url}?current_page={page}"
-            driver.get(page_url)
 
             try:
-                WebDriverWait(driver, 10).until(
-                    EC.presence_of_all_elements_located((By.XPATH, "//div[contains(@class, 'item-course')]"))
+                open_page_with_retry(
+                    driver=driver,
+                    url=page_url,
+                    wait_xpath="//div[contains(@class, 'item-course')]",
+                    timeout=10,
+                    max_retries=conf["max_retries"],
+                    retry_delay=conf["retry_delay"],
                 )
             except Exception:
-                print("Nenhum curso encontrado nesta página. Encerrando coleta.")
+                print("✅ Nenhum curso encontrado nesta página ou falha persistente. Encerrando coleta.")
                 break
 
-            course_elements = driver.find_elements(By.XPATH, "//div[contains(@class, 'item-course')]//a[contains(@class, 'link-overlay')]")
-            course_links = [element.get_attribute("href") for element in course_elements]
+            course_elements = driver.find_elements(
+                By.XPATH,
+                "//div[contains(@class, 'item-course')]//a[contains(@class, 'link-overlay')]"
+            )
+
+            course_links = [
+                element.get_attribute("href")
+                for element in course_elements
+                if element.get_attribute("href")
+            ]
 
             if not course_links:
-                print("Nenhum link de curso encontrado. Encerrando coleta.")
+                print("✅ Nenhum link de curso encontrado. Encerrando coleta.")
                 break
 
             page_signature = tuple(course_links)
             if page_signature in page_signatures:
-                print("Paginação repetida detectada. Encerrando para evitar loop infinito.")
+                print("⚠️ Paginação repetida detectada. Encerrando para evitar loop infinito.")
                 break
+
             page_signatures.add(page_signature)
 
             unregistered_courses = [link for link in course_links if link not in registered_courses]
 
             if not unregistered_courses:
-                print(f"Todos os cursos da página {page} já estão registrados.")
+                print(f"ℹ️ Todos os cursos da página {page} já estão registrados.")
             else:
                 for link in unregistered_courses:
-                    print(f"Processando curso: {link}")
+                    print(f"🔎 Processando curso: {link}")
                     course_data = scrape_course_details(driver, link, conf)
+
                     if course_data:
                         save_course(course_data, output_path)
                         registered_courses.add(link)
                         save_registered_courses(registry_path, registered_courses)
+                        print(f"💾 Curso salvo: {course_data['name']}")
+                    else:
+                        print(f"⚠️ Não foi possível salvar o curso: {link}")
 
             page += 1
             time.sleep(1)
 
         except Exception as page_error:
-            print(f"Erro na página {page}: {page_error}")
+            print(f"❌ Erro na página {page}: {page_error}")
             break
 
-if __name__ == "__main__":
-    conf_file = config_file()
 
-    OUTPUT_FILE = conf_file["out_file"]
-    REGISTRY_FILE = conf_file["already_scanned_file"]
+def main():
+    conf = config_file()
 
-    driver = setup_driver(conf_file)
+    output_file = conf["out_file"]
+    registry_file = conf["already_scanned_file"]
+
+    driver = setup_driver(conf)
+
     try:
-        scrape_courses(driver, conf_file, OUTPUT_FILE, REGISTRY_FILE)
-        print(f"Coleta concluída. Resultados salvos em {OUTPUT_FILE}")
+        scrape_courses(driver, conf, output_file, registry_file)
+        print(f"\n✅ Coleta concluída. Resultados salvos em: {Path(output_file).resolve()}")
     finally:
         driver.quit()
+        print("🛑 Navegador encerrado.")
+
+
+if __name__ == "__main__":
+    main()

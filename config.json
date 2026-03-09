@@ -1,9 +1,9 @@
 {
     "url": "https://unicv.edu.br/graduacao-bacharelado/",
     "starting_page": "1",
-    "category": "Pós-Graduação",
-    "modality": "Presencial",
-    "driver_path": "C:/Users/gabriel.simoes/Documents/vscode/chromedriver-win64/chromedriver.exe",
-    "out_file": "C:/Users/gabriel.simoes/Documents/vscode/arquivos/cursos.txt",
-    "already_scanned_file": "C:/Users/gabriel.simoes/Documents/vscode/arquivos/cursos_registrados.txt"
+    "category": "",
+    "modality": "",
+    "out_file": "C:/Users/gabriel.simoes/Downloads/WebScrap/Arquivos/cursos.txt",
+    "already_scanned_file": "C:/Users/gabriel.simoes/Downloads/WebScrap/Arquivos/cursos_registrados.txt",
+    "headless": false
 }
