@@ -23,9 +23,9 @@ def config_file():
     return conf
 
 # configuração do webdriver
-def setup_driver():
+def setup_driver(conf):
     """Configurar o Selenium WebDriver."""
-    driver_path = conf_file["driver_path"]
+    driver_path = conf["driver_path"]
     
     # Configurações adicionais do Chrome (opcional)
     chrome_options = Options()
@@ -89,7 +89,7 @@ def save_course(course, output_path):
         file.writelines(indice + corpo)
 
 # Pegar todas as informações sobre o curso
-def scrape_course_details(driver, course_url):
+def scrape_course_details(driver, course_url, conf):
     """Coletar detalhes de um curso individual com verificações de erro."""
     try:
         driver.get(course_url)
@@ -140,8 +140,8 @@ def scrape_course_details(driver, course_url):
             discount_value = "Valor com desconto não disponível"
 
         # Categoria e Modalidade fixas
-        category = conf_file["category"]
-        modality = conf_file["modality"]
+        category = conf["category"]
+        modality = conf["modality"]
 
         return {
             "name": name,
@@ -157,24 +157,41 @@ def scrape_course_details(driver, course_url):
         print(f"Erro ao acessar detalhes do curso {course_url}: {e}")
         return None
 
-def scrape_courses(driver, output_path, registry_path):
+def scrape_courses(driver, conf, output_path, registry_path):
     """Coletar todos os cursos navegando por paginação com verificações de erro."""
-    base_url = conf_file["url"]
+    base_url = conf["url"]
+    starting_page = conf["starting_page"]
     registered_courses = load_registered_courses(registry_path)
-    page = 1
-
-    driver.get(base_url)
+    page = starting_page
+    page_signatures = set()
 
     while True:
         try:
             print(f"Coletando página {page}...")
 
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_all_elements_located((By.XPATH, "//div[contains(@class, 'item-course')]"))
-            )
+            page_url = f"{base_url}?current_page={page}"
+            driver.get(page_url)
+
+            try:
+                WebDriverWait(driver, 10).until(
+                    EC.presence_of_all_elements_located((By.XPATH, "//div[contains(@class, 'item-course')]"))
+                )
+            except Exception:
+                print("Nenhum curso encontrado nesta página. Encerrando coleta.")
+                break
 
             course_elements = driver.find_elements(By.XPATH, "//div[contains(@class, 'item-course')]//a[contains(@class, 'link-overlay')]")
             course_links = [element.get_attribute("href") for element in course_elements]
+
+            if not course_links:
+                print("Nenhum link de curso encontrado. Encerrando coleta.")
+                break
+
+            page_signature = tuple(course_links)
+            if page_signature in page_signatures:
+                print("Paginação repetida detectada. Encerrando para evitar loop infinito.")
+                break
+            page_signatures.add(page_signature)
 
             unregistered_courses = [link for link in course_links if link not in registered_courses]
 
@@ -183,39 +200,14 @@ def scrape_courses(driver, output_path, registry_path):
             else:
                 for link in unregistered_courses:
                     print(f"Processando curso: {link}")
-                    course_data = scrape_course_details(driver, link)
+                    course_data = scrape_course_details(driver, link, conf)
                     if course_data:
                         save_course(course_data, output_path)
                         registered_courses.add(link)
                         save_registered_courses(registry_path, registered_courses)
 
-                driver.get(f"{base_url}?current_page={page}")
-                WebDriverWait(driver, 10).until(
-                    EC.presence_of_all_elements_located((By.XPATH, "//div[contains(@class, 'item-course')]"))
-                )
-
-            try:
-                next_button = WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.XPATH, "//a[contains(@class, 'next') and contains(@class, 'page-numbers')]"))
-                )
-
-                driver.execute_script("arguments[0].scrollIntoView(true);", next_button)
-                time.sleep(1)
-
-                try:
-                    next_button.click()
-                except Exception as click_error:
-                    print(f"O clique padrão falhou, tentando clique com JavaScript: {click_error}")
-                    driver.execute_script("arguments[0].click();", next_button)
-
-                WebDriverWait(driver, 10).until(
-                    EC.presence_of_all_elements_located((By.XPATH, "//div[contains(@class, 'item-course')]"))
-                )
-                time.sleep(3)
-                page += 1
-            except Exception as next_error:
-                print(f"Última página alcançada ou botão 'Próximo' não encontrado: {next_error}")
-                break
+            page += 1
+            time.sleep(1)
 
         except Exception as page_error:
             print(f"Erro na página {page}: {page_error}")
@@ -227,9 +219,9 @@ if __name__ == "__main__":
     OUTPUT_FILE = conf_file["out_file"]
     REGISTRY_FILE = conf_file["already_scanned_file"]
 
-    driver = setup_driver()
+    driver = setup_driver(conf_file)
     try:
-        scrape_courses(driver, OUTPUT_FILE, REGISTRY_FILE)
+        scrape_courses(driver, conf_file, OUTPUT_FILE, REGISTRY_FILE)
         print(f"Coleta concluída. Resultados salvos em {OUTPUT_FILE}")
     finally:
         driver.quit()
