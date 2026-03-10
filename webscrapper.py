@@ -43,6 +43,8 @@ def config_file(config_path="config.json"):
     conf["headless"] = bool(conf.get("headless", False))
     conf["max_retries"] = int(conf.get("max_retries", 3))
     conf["retry_delay"] = float(conf.get("retry_delay", 2))
+    conf["pagination_wait_timeout"] = int(conf.get("pagination_wait_timeout", 25))
+    conf["pagination_click_retries"] = int(conf.get("pagination_click_retries", 3))
 
     return conf
 
@@ -271,6 +273,115 @@ def extract_description(driver):
     return "Descrição não disponível"
 
 
+def get_course_links_from_listing(driver):
+    """Retorna os links dos cursos visíveis na listagem atual."""
+    course_elements = driver.find_elements(
+        By.XPATH,
+        "//div[contains(@class, 'item-course')]//a[contains(@class, 'link-overlay')]"
+    )
+
+    return [
+        element.get_attribute("href")
+        for element in course_elements
+        if element.get_attribute("href")
+    ]
+
+
+def go_to_next_page_by_click(driver, previous_signature, timeout=25, max_attempts=3, retry_delay=2):
+    """Clica em próxima página e aguarda mudança real dos cursos na listagem."""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            next_button = WebDriverWait(driver, 5, 0.5).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "a.next.page-numbers"))
+            )
+        except TimeoutException:
+            print("✅ Botão de próxima página não encontrado. Fim da paginação.")
+            return False
+
+        classes = (next_button.get_attribute("class") or "").lower()
+        aria_disabled = (next_button.get_attribute("aria-disabled") or "").lower()
+        if "disabled" in classes or aria_disabled == "true":
+            print("✅ Botão de próxima página desabilitado. Fim da paginação.")
+            return False
+
+        try:
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", next_button)
+            try:
+                next_button.click()
+            except Exception:
+                # fallback para casos de sobreposição de elementos
+                driver.execute_script("arguments[0].click();", next_button)
+
+            def listing_changed(drv):
+                try:
+                    current_signature = tuple(get_course_links_from_listing(drv))
+                    return bool(current_signature) and current_signature != previous_signature
+                except Exception:
+                    return False
+
+            WebDriverWait(driver, timeout, 0.5).until(listing_changed)
+            return True
+
+        except TimeoutException:
+            print(
+                f"⚠️ Tentativa {attempt}/{max_attempts}: listagem não atualizou após clique em próxima página."
+            )
+            if attempt < max_attempts:
+                time.sleep(retry_delay)
+                continue
+            print("⚠️ Limite de tentativas de paginação atingido.")
+            return False
+        except Exception as e:
+            print(f"⚠️ Falha ao avançar para a próxima página: {e}")
+            if attempt < max_attempts:
+                time.sleep(retry_delay)
+                continue
+            return False
+
+    return False
+
+
+def scrape_course_details_in_new_tab(driver, course_url, conf):
+    """Abre o curso em nova aba para não perder o estado da paginação na listagem."""
+    main_window = driver.current_window_handle
+    existing_handles = set(driver.window_handles)
+
+    try:
+        driver.execute_script("window.open(arguments[0], '_blank');", course_url)
+
+        new_handle = next(
+            (handle for handle in driver.window_handles if handle not in existing_handles),
+            None,
+        )
+
+        if not new_handle:
+            print(f"⚠️ Não foi possível abrir nova aba para o curso: {course_url}")
+            return None
+
+        driver.switch_to.window(new_handle)
+        return scrape_course_details(driver, course_url, conf)
+
+    except Exception as e:
+        print(f"⚠️ Falha ao processar curso em nova aba ({course_url}): {e}")
+        return None
+    finally:
+        current_handle = driver.current_window_handle
+
+        if current_handle != main_window:
+            try:
+                driver.close()
+            except Exception:
+                pass
+
+        try:
+            driver.switch_to.window(main_window)
+            WebDriverWait(driver, 10, 0.5).until(
+                EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'item-course')]"))
+            )
+        except Exception as e:
+            print(f"⚠️ Não foi possível restaurar totalmente a aba da listagem: {e}")
+
+
 def scrape_course_details(driver, course_url, conf):
     """Coleta detalhes de um curso individual com tratamento de erro e retry."""
     try:
@@ -341,35 +452,26 @@ def scrape_courses(driver, conf, output_path, registry_path):
     page = starting_page
     page_signatures = set()
 
+    initial_url = base_url if starting_page <= 1 else f"{base_url}?current_page={starting_page}"
+
+    try:
+        open_page_with_retry(
+            driver=driver,
+            url=initial_url,
+            wait_xpath="//div[contains(@class, 'item-course')]",
+            timeout=10,
+            max_retries=conf["max_retries"],
+            retry_delay=conf["retry_delay"],
+        )
+    except Exception:
+        print("❌ Falha ao abrir a página inicial da listagem de cursos.")
+        return
+
     while True:
         try:
             print(f"\n📄 Coletando página {page}...")
 
-            page_url = f"{base_url}?current_page={page}"
-
-            try:
-                open_page_with_retry(
-                    driver=driver,
-                    url=page_url,
-                    wait_xpath="//div[contains(@class, 'item-course')]",
-                    timeout=10,
-                    max_retries=conf["max_retries"],
-                    retry_delay=conf["retry_delay"],
-                )
-            except Exception:
-                print("✅ Nenhum curso encontrado nesta página ou falha persistente. Encerrando coleta.")
-                break
-
-            course_elements = driver.find_elements(
-                By.XPATH,
-                "//div[contains(@class, 'item-course')]//a[contains(@class, 'link-overlay')]"
-            )
-
-            course_links = [
-                element.get_attribute("href")
-                for element in course_elements
-                if element.get_attribute("href")
-            ]
+            course_links = get_course_links_from_listing(driver)
 
             if not course_links:
                 print("✅ Nenhum link de curso encontrado. Encerrando coleta.")
@@ -389,7 +491,7 @@ def scrape_courses(driver, conf, output_path, registry_path):
             else:
                 for link in unregistered_courses:
                     print(f"🔎 Processando curso: {link}")
-                    course_data = scrape_course_details(driver, link, conf)
+                    course_data = scrape_course_details_in_new_tab(driver, link, conf)
 
                     if course_data:
                         save_course(course_data, output_path)
@@ -398,6 +500,15 @@ def scrape_courses(driver, conf, output_path, registry_path):
                         print(f"💾 Curso salvo: {course_data['name']}")
                     else:
                         print(f"⚠️ Não foi possível salvar o curso: {link}")
+
+            if not go_to_next_page_by_click(
+                driver,
+                page_signature,
+                timeout=conf["pagination_wait_timeout"],
+                max_attempts=conf["pagination_click_retries"],
+                retry_delay=conf["retry_delay"],
+            ):
+                break
 
             page += 1
             time.sleep(1)
