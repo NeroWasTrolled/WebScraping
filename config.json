@@ -1,9 +1,9 @@
 {
-    "url": "https://unicv.edu.br/pos-graduacao-ead/",
+    "url": "https://unicive.com/graduacao-bacharelado-ead/",
     "starting_page": "1",
     "category": "EAD",
-    "modality": "Pós-Graduação",
-    "out_file": "C:/Users/gabriel.simoes/Downloads/WebScrap/Arquivos/cursos.txt",
-    "already_scanned_file": "C:/Users/gabriel.simoes/Downloads/WebScrap/Arquivos/cursos_registrados.txt",
+    "modality": "Bacharelado",
+    "out_file": "C:/Users/gabriel.simoes/Documents/WebScraping/Arquivos/cursos.txt",
+    "already_scanned_file": "C:/Users/gabriel.simoes/Documents/WebScraping/Arquivos/cursos_registrados.txt",
     "headless": false
 }

@@ -1,15 +1,19 @@
 from pathlib import Path
 import json
+import os
 import time
 
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.edge.service import Service as EdgeService
+from selenium.webdriver.edge.options import Options as EdgeOptions
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, WebDriverException
 from webdriver_manager.chrome import ChromeDriverManager
+from webdriver_manager.microsoft import EdgeChromiumDriverManager
 
 
 def config_file(config_path="config.json"):
@@ -49,25 +53,109 @@ def config_file(config_path="config.json"):
     return conf
 
 
-def setup_driver(conf):
-    """Configura o Selenium WebDriver com download automático do driver compatível."""
-    chrome_options = Options()
-    chrome_options.add_argument("--start-maximized")
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_argument("--log-level=3")
+def _first_existing_file(paths):
+    """Retorna o primeiro caminho de arquivo existente."""
+    for path in paths:
+        if not path:
+            continue
+        candidate = Path(path)
+        if candidate.is_file():
+            return str(candidate.resolve())
+    return None
+
+
+def find_chrome_binary(conf=None):
+    """Localiza o executável do Google Chrome no Windows."""
+    conf = conf or {}
+    return _first_existing_file(
+        [
+            conf.get("chrome_binary"),
+            os.environ.get("CHROME_BINARY"),
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            str(Path.home() / "AppData" / "Local" / "Google" / "Chrome" / "Application" / "chrome.exe"),
+        ]
+    )
+
+
+def find_edge_binary(conf=None):
+    """Localiza o executável do Microsoft Edge no Windows."""
+    conf = conf or {}
+    return _first_existing_file(
+        [
+            conf.get("edge_binary"),
+            os.environ.get("EDGE_BINARY"),
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        ]
+    )
+
+
+def _apply_browser_options(options, conf):
+    """Aplica argumentos comuns de Chrome/Edge Chromium."""
+    options.add_argument("--start-maximized")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--log-level=3")
 
     if conf.get("headless", False):
-        chrome_options.add_argument("--headless=new")
-        chrome_options.add_argument("--window-size=1920,1080")
+        options.add_argument("--headless=new")
+        options.add_argument("--window-size=1920,1080")
 
-    print("🔍 Detectando versão do Chrome e baixando ChromeDriver compatível...")
+    return options
 
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=chrome_options)
 
-    print("✅ ChromeDriver configurado com sucesso.")
+def _start_chrome(conf, chrome_binary):
+    """Inicia o Chrome e atualiza o ChromeDriver automaticamente se necessário."""
+    chrome_options = _apply_browser_options(Options(), conf)
+    chrome_options.binary_location = chrome_binary
 
+    print(f"🔍 Chrome encontrado em: {chrome_binary}")
+    print("⬇️ Verificando ChromeDriver compatível (atualiza automaticamente se necessário)...")
+
+    try:
+        driver = webdriver.Chrome(options=chrome_options)
+    except WebDriverException:
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+
+    print("✅ ChromeDriver pronto e sessão iniciada.")
     return driver
+
+
+def _start_edge(conf, edge_binary):
+    """Inicia o Edge e atualiza o EdgeDriver automaticamente se necessário."""
+    edge_options = _apply_browser_options(EdgeOptions(), conf)
+    edge_options.binary_location = edge_binary
+
+    print("Google Chrome não foi encontrado. Usando Microsoft Edge.")
+    print(f"🔍 Edge encontrado em: {edge_binary}")
+    print("⬇️ Verificando EdgeDriver compatível (atualiza automaticamente se necessário)...")
+
+    try:
+        driver = webdriver.Edge(options=edge_options)
+    except WebDriverException:
+        service = EdgeService(EdgeChromiumDriverManager().install())
+        driver = webdriver.Edge(service=service, options=edge_options)
+
+    print("✅ EdgeDriver pronto e sessão iniciada.")
+    return driver
+
+
+def setup_driver(conf):
+    """Configura o Selenium com download automático do driver compatível com o navegador instalado."""
+    chrome_binary = find_chrome_binary(conf)
+    if chrome_binary:
+        return _start_chrome(conf, chrome_binary)
+
+    edge_binary = find_edge_binary(conf)
+    if edge_binary:
+        return _start_edge(conf, edge_binary)
+
+    raise FileNotFoundError(
+        "Nenhum navegador compatível foi encontrado. Instale o Google Chrome "
+        "(https://www.google.com/chrome/) ou informe o caminho em config.json "
+        "com a chave 'chrome_binary'."
+    )
 
 
 def ensure_parent_dir(file_path):
@@ -228,6 +316,10 @@ def extract_description(driver):
     cobrindo múltiplas estruturas possíveis do site.
     """
     description_strategies = [
+        (
+            "bloco tutor-course-content-content",
+            "//div[contains(@class, 'tutor-course-content-content')]//*[self::p or self::li]"
+        ),
         (
             "layout tutor-course-summery",
             "//div[contains(@class, 'tutor-course-summery')]//p"
